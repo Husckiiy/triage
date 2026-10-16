@@ -237,121 +237,116 @@ async def iboplayer_login(page):
     raise RuntimeError(f"captcha falhou apos {CAPTCHA_TRIES} tentativas")
 
 
-async def iboplayer_update(m3u_url: str) -> bool:
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        ctx_kwargs = dict(
-            locale="pt-BR",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        )
-        if COOKIES.exists():
-            ctx_kwargs["storage_state"] = str(COOKIES)
+async def iboplayer_login(page):
+    await page.goto(IBO_LOGIN, wait_until="networkidle")
+    await page.wait_for_timeout(2000)
 
-        ctx = await browser.new_context(**ctx_kwargs)
-        page = await ctx.new_page()
+    for attempt in range(CAPTCHA_TRIES):
+        log.info(f"captcha tentativa {attempt + 1}/{CAPTCHA_TRIES}")
 
+        # TRATA O MODAL ANTES DE TUDO — em cada tentativa
+        await _accept_modals(page)
+
+        # verifica se ainda estamos na tela de login
+        if not await page.query_selector("#max-address"):
+            log.info("sessao iboplayer ja ativa")
+            return
+
+        await page.fill("#max-address", IBO_MAC)
+        await page.fill("#device-key", IBO_DEVKEY)
+
+        svg = await page.query_selector('form svg')
+        if not svg:
+            log.warning("captcha svg nao encontrado")
+            await page.reload(wait_until="networkidle")
+            await page.wait_for_timeout(1500)
+            continue
+
+        await page.evaluate("""
+            () => {
+                const svg = document.querySelector('form svg');
+                const bb = svg.getBBox();
+                svg.setAttribute('viewBox', `${bb.x} ${bb.y} ${bb.width} ${bb.height}`);
+                svg.setAttribute('width', bb.width * 4);
+                svg.setAttribute('height', bb.height * 4);
+            }
+        """)
+        await page.wait_for_timeout(300)
+
+        svg = await page.query_selector('form svg')
+        img_bytes = await svg.screenshot()
+        answer = await solve_captcha(img_bytes)
+        log.info(f"captcha lido: '{answer}'")
+
+        if len(answer) != 2:
+            log.warning("resposta invalida, tentando de novo")
+            await page.reload(wait_until="networkidle")
+            await page.wait_for_timeout(1500)
+            continue
+
+        captcha_input = await page.query_selector('form input[type="text"]:not(#max-address)')
+        await captcha_input.fill(answer)
+
+        # TRATA O MODAL DE NOVO (antes de clicar LOGIN)
+        await _accept_modals(page)
+
+        # CLICA LOGIN — usando JS pra contornar overlay
         try:
-            await iboplayer_login(page)
-            await ctx.storage_state(path=str(COOKIES))
+            await page.click('button:has-text("LOGIN")', timeout=5000)
+        except Exception:
+            log.info("clique normal falhou, usando JS")
+            await page.evaluate("""
+                () => {
+                    const btn = Array.from(document.querySelectorAll('button'))
+                        .find(b => b.innerText.trim().toUpperCase() === 'LOGIN');
+                    if (btn) btn.click();
+                }
+            """)
 
-            await page.goto(IBO_EDIT, wait_until="networkidle")
-            await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(2500)
 
-            for _ in range(10):
-                modal_aceito = False
-                for txt in ["Accept legal terms", "Aceitar Todos", "Accept"]:
-                    try:
-                        btn = await page.query_selector(f'button:has-text("{txt}")')
-                        if btn and await btn.is_visible():
-                            await btn.click()
-                            log.info(f"modal aceito: {txt}")
-                            await page.wait_for_timeout(1500)
-                            modal_aceito = True
-                            break
-                    except Exception:
-                        pass
-                if not modal_aceito:
-                    break
+        if await page.query_selector('text=Manage Playlists'):
+            log.info("login ok")
+            return
 
-            if "/edit/" not in page.url:
-                await page.goto(IBO_EDIT, wait_until="networkidle")
-                await page.wait_for_timeout(2000)
+        log.warning("captcha errado ou modal bloqueou, tentando de novo")
+        await page.reload(wait_until="networkidle")
+        await page.wait_for_timeout(1500)
 
-            await page.wait_for_selector("#playlist-url", timeout=15000, state="visible")
+    raise RuntimeError(f"captcha falhou apos {CAPTCHA_TRIES} tentativas")
 
-            url_antiga = await page.input_value("#playlist-url")
-            log.info(f"URL atual na playlist: {url_antiga[:80]}")
 
-            if url_antiga == m3u_url:
-                log.info("playlist ja tem a URL nova — nada a fazer")
-                return True
-
-            await page.fill("#playlist-url", m3u_url)
-            await page.wait_for_timeout(300)
-
-            valor_antes = await page.input_value("#playlist-url")
-            if valor_antes != m3u_url:
-                log.warning(f"campo nao aceitou a URL nova: {valor_antes[:60]}")
-
-            log.info("clicando SAVE...")
+async def _accept_modals(page):
+    """Aceita modais 'Accept legal terms' / 'Aceitar Todos' / 'Accept' se estiverem visiveis."""
+    for _ in range(3):
+        modal_aceito = False
+        for txt in ["Accept legal terms", "Aceitar Todos", "Accept"]:
             try:
-                async with page.expect_navigation(timeout=10000, wait_until="networkidle"):
-                    await page.click('button:has-text("SAVE")')
-                log.info(f"navegou para: {page.url}")
-            except PWTimeout:
-                log.info("sem navegacao apos SAVE — aguardando 3s")
-                await page.wait_for_timeout(3000)
-
-            for _ in range(5):
-                for txt in ["Accept legal terms", "Aceitar Todos", "Accept"]:
-                    try:
-                        btn = await page.query_selector(f'button:has-text("{txt}")')
-                        if btn and await btn.is_visible():
-                            await btn.click()
-                            await page.wait_for_timeout(1000)
-                            break
-                    except Exception:
-                        pass
-                break
-
-            if "/edit/" not in page.url:
-                log.info("SAVE navegou — voltando pra edicao pra confirmar")
-                await page.goto(IBO_EDIT, wait_until="networkidle")
-                await page.wait_for_timeout(2000)
-
-                for _ in range(5):
-                    for txt in ["Accept legal terms", "Aceitar Todos", "Accept"]:
-                        try:
-                            btn = await page.query_selector(f'button:has-text("{txt}")')
-                            if btn and await btn.is_visible():
-                                await btn.click()
-                                await page.wait_for_timeout(1000)
-                                break
-                        except Exception:
-                            pass
+                btn = await page.query_selector(f'button:has-text("{txt}")')
+                if btn and await btn.is_visible():
+                    await btn.click(timeout=3000)
+                    log.info(f"modal aceito: {txt}")
+                    await page.wait_for_timeout(1500)
+                    modal_aceito = True
                     break
-
-                await page.wait_for_selector("#playlist-url", timeout=15000, state="visible")
-
-            url_nova = await page.input_value("#playlist-url")
-            log.info(f"URL apos SAVE: {url_nova[:80]}")
-
-            if url_nova == m3u_url:
-                log.info("[OK] SAVE confirmado — playlist atualizada com sucesso")
-                return True
-            else:
-                log.error(f"[FALHA] URL nao confere apos SAVE")
-                log.error(f"  esperada: {m3u_url[:80]}")
-                log.error(f"  atual:    {url_nova[:80]}")
-                return False
-
-        finally:
-            await browser.close()
-
+            except Exception:
+                # fallback: clica via JS
+                try:
+                    await page.evaluate(f"""
+                        () => {{
+                            const btn = Array.from(document.querySelectorAll('button'))
+                                .find(b => b.innerText.trim().includes('{txt}'));
+                            if (btn) btn.click();
+                        }}
+                    """)
+                    log.info(f"modal aceito (via JS): {txt}")
+                    await page.wait_for_timeout(1500)
+                    modal_aceito = True
+                    break
+                except Exception:
+                    pass
+        if not modal_aceito:
+            break
 
 async def fetch_m3u() -> str | None:
     inbox_addr, _, token = await make_inbox()
