@@ -1,0 +1,6 @@
+httpx
+playwright
+python-dotenv
+pillow
+numpy
+opencv-python-headless
