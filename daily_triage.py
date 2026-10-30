@@ -308,7 +308,17 @@ async def iboplayer_update(m3u_url: str) -> bool:
                 await page.wait_for_timeout(2000)
                 await _accept_modals(page)
 
-            await page.wait_for_selector("#playlist-url", timeout=15000, state="visible")
+                       # Remove qualquer modal de termos que esteja bloqueando a tela
+            await page.evaluate("""
+                () => {
+                    const modals = document.querySelectorAll('[class*="modal"], [class*="terms"]');
+                    modals.forEach(m => m.remove());
+                }
+            """)
+            await page.wait_for_timeout(1000)
+
+            # Aumenta o timeout para 60 segundos
+            await page.wait_for_selector("#playlist-url", timeout=60000, state="visible")
 
             url_antiga = await page.input_value("#playlist-url")
             log.info(f"URL atual na playlist: {url_antiga[:80]}")
