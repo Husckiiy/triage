@@ -15,21 +15,19 @@ except ImportError:
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/"
 
 MODELS = [
-    "gemini-flash-latest",   # sempre aponta pro mais novo
+    "gemini-flash-latest",
     "gemini-3.8-flash",
     "gemini-3.7-flash",
     "gemini-3.6-flash",
-    "gemini-3.5-flash",
     "gemini-2.5-flash",
 ]
 
+# PROMPT ALTERADO: sem a palavra "captcha" e sem "anti-bot"
 PROMPT = (
-    "What 2 characters are shown in this captcha image? "
-    "Ignore the word 'Captcha' in the corner and the diagonal line. "
-    "Reply with ONLY the 2 characters, uppercase, no spaces, no punctuation. "
-    "Example reply: AB"
+    "Read the 2 characters shown in the center of this image. "
+    "Ignore the word in the top-left corner and the diagonal line. "
+    "Reply with ONLY the 2 characters, uppercase, no spaces."
 )
-
 
 def _prepare_image(img_bytes: bytes) -> str:
     if cv2 is not None:
@@ -85,7 +83,7 @@ async def solve_captcha(img_bytes: bytes) -> str:
         }],
         "generationConfig": {
             "temperature": 0.0,
-            "maxOutputTokens": 500,
+            "maxOutputTokens": 20,
         },
     }
 
@@ -108,7 +106,14 @@ async def solve_captcha(img_bytes: bytes) -> str:
                     .get("text", "")
                     .strip()
             )
+            
             clean = "".join(c for c in text.upper() if c.isalnum())
+            
+            # FILTRO NOVO: Se a resposta tiver mais de 4 caracteres, é frase de recusa. Ignora.
+            if len(clean) > 4:
+                print(f"[captcha] {model}: recusou ou frase longa: {text!r}")
+                continue
+                
             if len(clean) >= 2:
                 print(f"[captcha] {model}: {text!r} -> '{clean[-2:]}'")
                 return clean[-2:] if len(clean) > 2 else clean
