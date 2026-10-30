@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import os
+import time
 import urllib.request
 
 import numpy as np
@@ -14,15 +15,13 @@ except ImportError:
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/"
 
+# Reduzido para 2 modelos para evitar Rate Limit (429)
 MODELS = [
     "gemini-flash-latest",
-    "gemini-3.8-flash",
-    "gemini-3.7-flash",
     "gemini-3.6-flash",
-    "gemini-2.5-flash",
 ]
 
-# PROMPT ALTERADO: sem a palavra "captcha" e sem "anti-bot"
+# Prompt sem a palavra "captcha" para evitar recusa de segurança
 PROMPT = (
     "Read the 2 characters shown in the center of this image. "
     "Ignore the word in the top-left corner and the diagonal line. "
@@ -97,7 +96,8 @@ async def solve_captcha(img_bytes: bytes) -> str:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            # Aumentado para 60s
+            with urllib.request.urlopen(req, timeout=60) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             text = (
                 data.get("candidates", [{}])[0]
@@ -109,7 +109,6 @@ async def solve_captcha(img_bytes: bytes) -> str:
             
             clean = "".join(c for c in text.upper() if c.isalnum())
             
-            # FILTRO NOVO: Se a resposta tiver mais de 4 caracteres, é frase de recusa. Ignora.
             if len(clean) > 4:
                 print(f"[captcha] {model}: recusou ou frase longa: {text!r}")
                 continue
@@ -121,6 +120,9 @@ async def solve_captcha(img_bytes: bytes) -> str:
                 print(f"[captcha] {model}: resposta curta demais: {text!r}")
         except urllib.error.HTTPError as e:
             print(f"[captcha] {model}: HTTP {e.code}")
+            if e.code == 429:
+                print("[captcha] Rate Limit atingido. Esperando 3s...")
+                time.sleep(3) # Evita o bloqueio
             continue
         except Exception as e:
             print(f"[captcha] {model}: {e}")
