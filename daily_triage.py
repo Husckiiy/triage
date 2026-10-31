@@ -226,26 +226,42 @@ async def solve_captcha(img_bytes: bytes) -> str:
 async def iboplayer_login(page):
     await page.goto(IBO_LOGIN, wait_until="networkidle")
     await page.wait_for_timeout(2000)
+
     for attempt in range(CAPTCHA_TRIES):
         log.info(f"captcha tentativa {attempt + 1}/{CAPTCHA_TRIES}")
+
         await _accept_modals(page)
+
         if not await page.query_selector("#max-address"):
             log.info("sessao iboplayer ja ativa")
             return
+
         await page.fill("#max-address", IBO_MAC)
         await page.fill("#device-key", IBO_DEVKEY)
+
         svg = await page.query_selector('form svg')
         if not svg:
+            log.warning("captcha svg nao encontrado")
             await page.reload(wait_until="networkidle")
             await page.wait_for_timeout(1500)
             continue
-        await page.evaluate("() => { const svg = document.querySelector('form svg'); const bb = svg.getBBox(); svg.setAttribute('viewBox', `${bb.x} ${bb.y} ${bb.width} ${bb.height}`); svg.setAttribute('width', bb.width * 4); svg.setAttribute('height', bb.height * 4); }")
+
+        await page.evaluate("""
+            () => {
+                const svg = document.querySelector('form svg');
+                const bb = svg.getBBox();
+                svg.setAttribute('viewBox', `${bb.x} ${bb.y} ${bb.width} ${bb.height}`);
+                svg.setAttribute('width', bb.width * 4);
+                svg.setAttribute('height', bb.height * 4);
+            }
+        """)
         await page.wait_for_timeout(300)
+
         svg = await page.query_selector('form svg')
         img_bytes = await svg.screenshot()
         answer = await solve_captcha(img_bytes)
         log.info(f"captcha lido: '{answer}'")
-        
+
         if len(answer) != 2:
             log.warning("resposta invalida, tentando de novo")
             await page.reload(wait_until="networkidle")
@@ -255,18 +271,32 @@ async def iboplayer_login(page):
 
         captcha_input = await page.query_selector('form input[type="text"]:not(#max-address)')
         await captcha_input.fill(answer)
+
         await _accept_modals(page)
+
         try:
             await page.click('button:has-text("LOGIN")', timeout=5000)
         except Exception:
-            pass
+            log.info("clique normal falhou, usando JS")
+            await page.evaluate("""
+                () => {
+                    const btn = Array.from(document.querySelectorAll('button'))
+                        .find(b => b.innerText.trim().toUpperCase() === 'LOGIN');
+                    if (btn) btn.click();
+                }
+            """)
+
         await page.wait_for_timeout(2500)
+
         if not await page.query_selector('#max-address'):
             log.info("login ok")
             return
+
+        log.warning("captcha errado ou modal bloqueou, tentando de novo")
         await page.reload(wait_until="networkidle")
         await page.wait_for_timeout(1500)
-    raise RuntimeError("captcha falhou")
+
+    raise RuntimeError(f"captcha falhou apos {CAPTCHA_TRIES} tentativas")
 
 async def iboplayer_update(m3u_url: str) -> bool:
     async with async_playwright() as p:
