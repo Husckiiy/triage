@@ -241,11 +241,11 @@ async def iboplayer_login(page):
         answer = await solve_captcha(img_bytes)
         log.info(f"captcha lido: '{answer}'")
 
-         if len(answer) != 2:
+       if len(answer) != 2:
             log.warning("resposta invalida, tentando de novo")
             await page.reload(wait_until="networkidle")
             await page.wait_for_timeout(1500)
-            await asyncio.sleep(10) # Espera 10 segundos para o Rate Limit do Gemini resetar
+            await asyncio.sleep(10)  # Espera 10 segundos
             continue
 
         captcha_input = await page.query_selector('form input[type="text"]:not(#max-address)')
