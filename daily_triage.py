@@ -1,7 +1,6 @@
 # language: Python 3.11+, file: daily_triage.py
 # deps: pip install httpx playwright python-dotenv pillow numpy opencv-python-headless
 # execução: 1x/dia via cron (Railway Cron Job) ou xvfb-run -a python daily_triage.py
-# ambiente: Docker + xvfb (start.sh cuida disso)
 
 import asyncio
 import json
@@ -11,14 +10,21 @@ import re
 import secrets
 import string
 import sys
+import time
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+import numpy as np
+from PIL import Image
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
-from captcha_ocr import solve_captcha
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 # ---------- config ----------
 load_dotenv()
@@ -30,14 +36,13 @@ IBO_EDIT  = os.getenv("IBO_PLAYLIST_EDIT_URL")
 
 IBO_MAC    = os.getenv("IBO_MAC")
 IBO_DEVKEY = os.getenv("IBO_DEVKEY")
+GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 
 if not all([IBO_MAC, IBO_DEVKEY, IBO_EDIT]):
-    print("[!] variaveis de ambiente incompletas (IBO_MAC, IBO_DEVKEY, IBO_PLAYLIST_EDIT_URL)")
+    print("[!] .env incompleto (IBO_MAC, IBO_DEVKEY, IBO_PLAYLIST_EDIT_URL)")
     sys.exit(3)
 
-BASE_DIR = Path(os.getenv("DATA_DIR", str(Path(__file__).parent)))
-BASE_DIR.mkdir(parents=True, exist_ok=True)
-
+BASE_DIR   = Path(os.getenv("DATA_DIR", str(Path(__file__).parent)))
 LOCK_FILE  = Path("/tmp/daily_triage.lock")
 STATE_FILE = BASE_DIR / "state.json"
 LOG_FILE   = BASE_DIR / "triage.log"
@@ -171,7 +176,6 @@ async def submit_form(page, inbox_addr: str):
 
 
 async def _accept_modals(page):
-    """Aceita modais 'Accept legal terms' / 'Aceitar Todos' / 'Accept' se estiverem visiveis."""
     for _ in range(3):
         modal_aceito = False
         for txt in ["Accept legal terms", "Aceitar Todos", "Accept"]:
@@ -200,6 +204,120 @@ async def _accept_modals(page):
                     pass
         if not modal_aceito:
             break
+
+
+def _prepare_image(img_bytes: bytes) -> str:
+    import base64
+    if cv2 is not None:
+        arr = np.frombuffer(img_bytes, np.uint8)
+        img_bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img_bgr is not None:
+            b, g, r = cv2.split(img_bgr)
+            line_mask = ((r.astype(int) - g.astype(int) > 25) |
+                         (b.astype(int) - g.astype(int) > 25))
+            line_mask = line_mask.astype(np.uint8) * 255
+            line_mask = cv2.dilate(line_mask, np.ones((3, 3), np.uint8), iterations=1)
+
+            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+            h, w = gray.shape
+            gray[line_mask > 0] = 0
+            gray[0:int(h * 0.22), 0:int(w * 0.35)] = 0
+
+            p_low, p_high = np.percentile(gray, [5, 95])
+            if p_high > p_low:
+                stretched = np.clip((gray.astype(np.float32) - p_low) * 255.0 / (p_high - p_low), 0, 255)
+                gray = stretched.astype(np.uint8)
+
+            inverted = 255 - gray
+            pil_img = Image.fromarray(inverted).convert("RGB")
+        else:
+            pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    else:
+        pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+
+    pil_img = pil_img.resize((pil_img.width * 2, pil_img.height * 2), Image.LANCZOS)
+    buf = io.BytesIO()
+    pil_img.save(buf, format="JPEG", quality=90)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+async def solve_captcha(img_bytes: bytes) -> str:
+    if not img_bytes:
+        return ""
+
+    api_key = GEMINI_KEY
+    if not api_key:
+        print("[captcha] GEMINI_API_KEY nao configurada")
+        return ""
+
+    b64 = _prepare_image(img_bytes)
+
+    MODELS = [
+        "gemini-flash-latest",
+        "gemini-3.6-flash",
+    ]
+
+    PROMPT = (
+        "Read the 2 characters shown in the center of this image. "
+        "Ignore the word in the top-left corner and the diagonal line. "
+        "Reply with ONLY the 2 characters, uppercase, no spaces."
+    )
+
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": PROMPT},
+                {"inline_data": {"mime_type": "image/jpeg", "data": b64}},
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.0,
+            "maxOutputTokens": 20,
+        },
+    }
+
+    body = json.dumps(payload).encode("utf-8")
+    BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/"
+
+    for model in MODELS:
+        url = f"{BASE_URL}{model}:generateContent"
+        req = urllib.request.Request(
+            url, data=body,
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            
+            candidates = data.get("candidates", [])
+            if not candidates:
+                print(f"[captcha] {model}: resposta sem candidates")
+                continue
+                
+            text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+            clean = "".join(c for c in text.upper() if c.isalnum())
+            
+            if len(clean) > 4:
+                print(f"[captcha] {model}: recusou ou frase longa: {text!r}")
+                continue
+                
+            if len(clean) >= 2:
+                print(f"[captcha] {model}: {text!r} -> '{clean[-2:]}'")
+                return clean[-2:] if len(clean) > 2 else clean
+            else:
+                print(f"[captcha] {model}: resposta curta demais: {text!r}")
+        except urllib.error.HTTPError as e:
+            print(f"[captcha] {model}: HTTP {e.code}")
+            if e.code == 429:
+                await asyncio.sleep(3)
+            continue
+        except Exception as e:
+            print(f"[captcha] {model}: {e}")
+            continue
+
+    print("[captcha] todos os modelos falharam")
+    return ""
 
 
 async def iboplayer_login(page):
@@ -241,11 +359,11 @@ async def iboplayer_login(page):
         answer = await solve_captcha(img_bytes)
         log.info(f"captcha lido: '{answer}'")
 
-       if len(answer) != 2:
+        if len(answer) != 2:
             log.warning("resposta invalida, tentando de novo")
             await page.reload(wait_until="networkidle")
             await page.wait_for_timeout(1500)
-            await asyncio.sleep(10)  # Espera 10 segundos
+            await asyncio.sleep(5)
             continue
 
         captcha_input = await page.query_selector('form input[type="text"]:not(#max-address)')
@@ -267,7 +385,7 @@ async def iboplayer_login(page):
 
         await page.wait_for_timeout(2500)
 
-        if await page.query_selector('text=Manage Playlists'):
+        if not await page.query_selector('#max-address'):
             log.info("login ok")
             return
 
@@ -309,7 +427,7 @@ async def iboplayer_update(m3u_url: str) -> bool:
                 await page.wait_for_timeout(2000)
                 await _accept_modals(page)
 
-                       # Remove qualquer modal de termos que esteja bloqueando a tela
+            # Remove modais que possam ter ficado
             await page.evaluate("""
                 () => {
                     const modals = document.querySelectorAll('[class*="modal"], [class*="terms"]');
@@ -318,7 +436,6 @@ async def iboplayer_update(m3u_url: str) -> bool:
             """)
             await page.wait_for_timeout(1000)
 
-            # Aumenta o timeout para 60 segundos
             await page.wait_for_selector("#playlist-url", timeout=60000, state="visible")
 
             url_antiga = await page.input_value("#playlist-url")
