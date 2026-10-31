@@ -17,8 +17,8 @@ BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/"
 
 # Reduzido para 2 modelos para evitar Rate Limit (429)
 MODELS = [
-    "gemini-2.5-flash",  # <--- Modelo atualizado e estável
-    "gemini-2.0-flash",  # <--- Alternativa caso o 2.5 dê limite
+    "gemini-3.6-flash",
+    "gemini-2.5-flash-lite",
 ]
 
 # Prompt sem a palavra "captcha" para evitar recusa de segurança
