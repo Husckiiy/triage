@@ -9,7 +9,7 @@ import string
 import sys
 import time
 import urllib.request
-import io  # <--- Import necessário para o processamento de imagem
+import io
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -203,22 +203,16 @@ async def iboplayer_login(page):
         """)
         await page.wait_for_timeout(300)
 
+        # --- INÍCIO DO TRECHO SEGURO PARA O SCREENSHOT ---
         svg = await page.query_selector('form svg')
         
-        # Pega a caixa delimitadora do SVG
-        box = await svg.bounding_box()
-        
-        # Print focado apenas na área das letras (ignorando o topo e as bordas)
-        img_bytes = await page.screenshot(clip={
-            "x": box["x"] + (box["width"] * 0.1),
-            "y": box["y"] + (box["height"] * 0.25),
-            "width": box["width"] * 0.8,
-            "height": box["height"] * 0.6
-        })
+        # Tira o print do SVG inteiro, sem calcular coordenadas (evita o erro de clipped area)
+        img_bytes = await svg.screenshot()
 
-        # Chama o Gemini para resolver
+        # Chama o Gemini
         answer = await solve_captcha(img_bytes)
         log.info(f"captcha lido: '{answer}'")
+        # --- FIM DO TRECHO SEGURO ---
 
         if len(answer) != 2:
             log.warning("resposta invalida, tentando de novo")
