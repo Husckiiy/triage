@@ -203,16 +203,11 @@ async def iboplayer_login(page):
         """)
         await page.wait_for_timeout(300)
 
-        # --- INÍCIO DO TRECHO SEGURO PARA O SCREENSHOT ---
         svg = await page.query_selector('form svg')
-        
-        # Tira o print do SVG inteiro, sem calcular coordenadas (evita o erro de clipped area)
         img_bytes = await svg.screenshot()
 
-        # Chama o Gemini
         answer = await solve_captcha(img_bytes)
         log.info(f"captcha lido: '{answer}'")
-        # --- FIM DO TRECHO SEGURO ---
 
         if len(answer) != 2:
             log.warning("resposta invalida, tentando de novo")
@@ -260,31 +255,57 @@ async def iboplayer_update(m3u_url: str) -> bool:
         try:
             await iboplayer_login(page)
             await ctx.storage_state(path=str(COOKIES))
+            
+            log.info("Acessando pagina de edicao...")
             await page.goto(IBO_EDIT, wait_until="networkidle")
             await page.wait_for_timeout(2000)
             await _accept_modals(page)
+            
             if "/edit/" not in page.url:
+                log.info("Redirecionando novamente para a edicao...")
                 await page.goto(IBO_EDIT, wait_until="networkidle")
                 await page.wait_for_timeout(2000)
+                
             await page.evaluate("() => { const modals = document.querySelectorAll('[class*=\"modal\"], [class*=\"terms\"]'); modals.forEach(m => m.remove()); }")
             await page.wait_for_timeout(1000)
+            
+            log.info("Esperando o campo da playlist (#playlist-url)...")
             await page.wait_for_selector("#playlist-url", timeout=60000, state="visible")
+            
             url_antiga = await page.input_value("#playlist-url")
-            if url_antiga == m3u_url: return True
+            log.info(f"URL antiga encontrada: {url_antiga}")
+            
+            if url_antiga == m3u_url:
+                log.info("A URL ja e a mesma, nada a fazer.")
+                return True
+                
+            log.info(f"Preenchendo nova URL: {m3u_url}")
             await page.fill("#playlist-url", m3u_url)
             await page.wait_for_timeout(300)
+            
+            log.info("Clicando no botao SAVE...")
             try:
                 async with page.expect_navigation(timeout=10000, wait_until="networkidle"):
                     await page.click('button:has-text("SAVE")', timeout=5000)
-            except Exception:
-                pass
+                log.info("Navegacao apos o SAVE concluida.")
+            except Exception as e:
+                log.warning(f"AVISO: Nao houve navegacao apos o clique no SAVE. Erro: {e}")
+                
             await _accept_modals(page)
+            
             if "/edit/" not in page.url:
                 await page.goto(IBO_EDIT, wait_until="networkidle")
                 await page.wait_for_timeout(2000)
                 await page.wait_for_selector("#playlist-url", timeout=15000, state="visible")
+                
             url_nova = await page.input_value("#playlist-url")
+            log.info(f"URL nova confirmada: {url_nova}")
+            
             return url_nova == m3u_url
+            
+        except Exception as e:
+            log.error(f"ERRO NA ATUALIZACAO DA PLAYLIST: {e}")
+            return False
         finally:
             await browser.close()
 
@@ -316,7 +337,11 @@ async def run_daily() -> bool:
                 return False
             fname = M3U_OUT / f"{datetime.now().strftime('%Y-%m-%d')}.m3u"
             fname.write_text(m3u, encoding="utf-8")
+            
+            log.info("Iniciando atualizacao no ioplayer...")
             ibo_ok = await iboplayer_update(m3u)
+            log.info(f"Resultado da atualizacao: {ibo_ok}")
+            
             state["runs"].append({"id": run_id, "ok": ibo_ok, "file": str(fname)})
             if ibo_ok: state["last_success"] = run_id
             save_state(state)
