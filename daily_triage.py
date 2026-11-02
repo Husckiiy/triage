@@ -203,9 +203,18 @@ async def iboplayer_login(page):
         """)
         await page.wait_for_timeout(300)
 
-        svg = await page.query_selector('form svg')
-        img_bytes = await svg.screenshot()
+       svg = await page.query_selector('form svg')
         
+        # Pega a caixa delimitadora exata do SVG
+        box = await svg.bounding_box()
+        
+        # Tira o print APENAS da parte central/baixa do SVG, ignorando o topo e as bordas
+        img_bytes = await page.screenshot(clip={
+            "x": box["x"] + (box["width"] * 0.1),           # Pula 10% da esquerda
+            "y": box["y"] + (box["height"] * 0.25),         # Pula 25% do topo (onde fica a palavra "Captcha")
+            "width": box["width"] * 0.8,                    # Pega 80% da largura
+            "height": box["height"] * 0.6                   # Pega 60% da altura
+        })
         # Chama o Gemini
         answer = await solve_captcha(img_bytes)
         log.info(f"captcha lido: '{answer}'")
