@@ -9,7 +9,7 @@ import string
 import sys
 import time
 import urllib.request
-import io  # <--- IMPORT ADICIONADO AQUI
+import io  # <--- Import necessário para o processamento de imagem
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,7 +19,7 @@ from PIL import Image
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
-# Importa as funções de OCR do outro arquivo para evitar duplicação
+# Importa as funções de OCR do outro arquivo
 from captcha_ocr import solve_captcha, _prepare_image
 
 try:
@@ -203,19 +203,20 @@ async def iboplayer_login(page):
         """)
         await page.wait_for_timeout(300)
 
-       svg = await page.query_selector('form svg')
+        svg = await page.query_selector('form svg')
         
-        # Pega a caixa delimitadora exata do SVG
+        # Pega a caixa delimitadora do SVG
         box = await svg.bounding_box()
         
-        # Tira o print APENAS da parte central/baixa do SVG, ignorando o topo e as bordas
+        # Print focado apenas na área das letras (ignorando o topo e as bordas)
         img_bytes = await page.screenshot(clip={
-            "x": box["x"] + (box["width"] * 0.1),           # Pula 10% da esquerda
-            "y": box["y"] + (box["height"] * 0.25),         # Pula 25% do topo (onde fica a palavra "Captcha")
-            "width": box["width"] * 0.8,                    # Pega 80% da largura
-            "height": box["height"] * 0.6                   # Pega 60% da altura
+            "x": box["x"] + (box["width"] * 0.1),
+            "y": box["y"] + (box["height"] * 0.25),
+            "width": box["width"] * 0.8,
+            "height": box["height"] * 0.6
         })
-        # Chama o Gemini
+
+        # Chama o Gemini para resolver
         answer = await solve_captcha(img_bytes)
         log.info(f"captcha lido: '{answer}'")
 
@@ -257,7 +258,6 @@ async def iboplayer_login(page):
 
 async def iboplayer_update(m3u_url: str) -> bool:
     async with async_playwright() as p:
-        # ALTERADO PARA headless=True AQUI
         browser = await p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
         ctx_kwargs = dict(locale="pt-BR", user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
         if COOKIES.exists(): ctx_kwargs["storage_state"] = str(COOKIES)
@@ -298,7 +298,6 @@ async def fetch_m3u() -> str | None:
     inbox_addr, _, token = await make_inbox()
     log.info(f"inbox: {inbox_addr}")
     async with async_playwright() as p:
-        # ALTERADO PARA headless=True AQUI
         browser = await p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
         ctx = await browser.new_context(locale="pt-BR", user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
         page = await ctx.new_page()
