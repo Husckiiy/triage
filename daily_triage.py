@@ -10,6 +10,7 @@ import sys
 import time
 import urllib.request
 import io
+import random
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,7 +30,8 @@ except ImportError:
 
 load_dotenv()
 
-MAILTM    = "https://api.mail.tm"
+# 🚨 MUDANÇA: URL base do 1SecMail
+MAILTM    = "https://www.1secmail.com/api/v1/"
 FORM_URL  = "https://www.testersgc.fun/plan4z4k/afi9egnzv2"
 IBO_LOGIN = "https://iboplayer.com/dashboard"
 IBO_EDIT  = os.getenv("IBO_PLAYLIST_EDIT_URL")
@@ -99,64 +101,52 @@ def rand_name() -> tuple[str, str]:
     last  = ["Almeida", "Costa", "Ferreira", "Rocha", "Barbosa", "Mendes"]
     return secrets.choice(first), secrets.choice(last)
 
+# 🚨 NOVA FUNÇÃO: make_inbox para o 1SecMail
 async def make_inbox() -> tuple[str, str, str]:
+    local = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
+    
     async with httpx.AsyncClient(timeout=20) as c:
-        resp_domains = await c.get(f"{MAILTM}/domains")
-        domains = resp_domains.json()
+        resp = await c.get(f"{MAILTM}?action=getDomainList")
+        if resp.status_code != 200:
+            raise Exception("Falha ao obter domínios do 1SecMail")
         
-        if not domains.get("hydra:member"):
-            log.error("❌ Nenhum domínio disponível no Mail.tm.")
-            raise Exception("Sem domínios no Mail.tm")
-
-        domain = domains["hydra:member"][0]["domain"]
-        local = "t" + "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(15))
+        domains = resp.json()
+        if not domains:
+            raise Exception("Nenhum domínio disponível no 1SecMail")
+        
+        domain = random.choice(domains)
         addr = f"{local}@{domain}"
-        pwd = secrets.token_urlsafe(12)
-
-        resp_create = await c.post(f"{MAILTM}/accounts", json={"address": addr, "password": pwd})
         
-        if resp_create.status_code != 201:
-            log.error(f"❌ Falha ao criar e-mail. Status: {resp_create.status_code}")
-            if len(domains["hydra:member"]) > 1:
-                log.info("Tentando o segundo domínio...")
-                domain = domains["hydra:member"][1]["domain"]
-                addr = f"{local}@{domain}"
-                resp_create = await c.post(f"{MAILTM}/accounts", json={"address": addr, "password": pwd})
-                if resp_create.status_code != 201:
-                    raise Exception("Falha ao criar conta no Mail.tm")
-            else:
-                raise Exception("Falha ao criar conta no Mail.tm")
+        log.info(f"✅ E-mail temporário criado (1SecMail): {addr}")
+        return addr, local, domain
 
-        resp_token = await c.post(f"{MAILTM}/token", json={"address": addr, "password": pwd})
-        
-        if resp_token.status_code != 200:
-            log.error(f"❌ Falha ao pegar token. Status: {resp_token.status_code}")
-            raise Exception("Falha ao obter token do Mail.tm")
-
-        tok = resp_token.json()["token"]
-        log.info(f"✅ E-mail temporário criado: {addr}")
-        return addr, pwd, tok
-
-# 🚨 FUNÇÃO CORRIGIDA AQUI (Evita erro 429)
-async def wait_for_email(token: str, timeout_s: int = 600) -> dict:
-    headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient(timeout=20, headers=headers) as c:
+# 🚨 NOVA FUNÇÃO: wait_for_email para o 1SecMail
+async def wait_for_email(inbox_addr: str, timeout_s: int = 600) -> dict:
+    login, domain = inbox_addr.split("@")
+    
+    async with httpx.AsyncClient(timeout=20) as c:
         for _ in range(timeout_s // 15): 
             await asyncio.sleep(15) 
             try:
-                resp = await c.get(f"{MAILTM}/messages")
+                resp = await c.get(f"{MAILTM}?action=getMessages&login={login}&domain={domain}")
                 
                 if resp.status_code == 429:
-                    log.warning("⚠️ Mail.tm bloqueou (429 Too Many Requests). Esperando 60 segundos...")
+                    log.warning("⚠️ 1SecMail bloqueou (429). Esperando 60 segundos...")
                     await asyncio.sleep(60)
                     continue
                 
-                msgs = resp.json()
-                if msgs.get("hydra:member"):
-                    mid = msgs["hydra:member"][0]["id"]
-                    return (await c.get(f"{MAILTM}/messages/{mid}")).json()
+                if resp.status_code == 200:
+                    msgs = resp.json()
+                    if msgs: 
+                        msg_id = msgs[0]["id"]
+                        msg_resp = await c.get(f"{MAILTM}?action=readMessage&login={login}&domain={domain}&id={msg_id}")
+                        if msg_resp.status_code == 200:
+                            return msg_resp.json()
+                else:
+                    log.warning(f"Status inesperado do 1SecMail: {resp.status_code}")
+                    
             except Exception as e:
-                log.error(f"Erro ao checar e-mail: {e}")
+                log.error(f"Erro ao checar e-mail (1SecMail): {e}")
                 await asyncio.sleep(15)
                 
     raise TimeoutError("sem email na janela")
@@ -364,8 +354,14 @@ async def iboplayer_update(m3u_url: str) -> bool:
             await browser.close()
 
 async def fetch_m3u() -> str | None:
-    inbox_addr, _, token = await make_inbox()
+    # 🚨 MUDANÇA: Agora recebe (endereço, login, domínio)
+    inbox_addr, _, domain = await make_inbox() 
     log.info(f"inbox: {inbox_addr}")
+    
+    # Espera inicial para dar tempo do site enviar o e-mail
+    log.info("⏳ Aguardando 30 segundos iniciais antes de checar a caixa de entrada...")
+    await asyncio.sleep(30)
+    
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
         ctx = await browser.new_context(locale="pt-BR", user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
@@ -375,8 +371,9 @@ async def fetch_m3u() -> str | None:
         finally:
             await browser.close()
             
-    # 🚨 FUNÇÃO CORRIGIDA AQUI (timeout_s=600)
-    msg = await wait_for_email(token, timeout_s=600)
+    # 🚨 MUDANÇA: Passa o endereço completo para a função de espera
+    msg = await wait_for_email(inbox_addr, timeout_s=600)
+    
     body = msg.get("text") or " ".join(msg.get("html", []))
     return extract_m3u(body)
 
