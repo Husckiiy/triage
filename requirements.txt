@@ -4,3 +4,4 @@ python-dotenv
 pillow
 numpy
 opencv-python-headless
+urllib3==2.2.1
