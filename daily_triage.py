@@ -11,6 +11,7 @@ import time
 import urllib.request
 import io
 import random
+import urllib3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,9 +29,12 @@ try:
 except ImportError:
     cv2 = None
 
+# 🚨 Desativa o aviso de segurança do SSL no console
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 load_dotenv()
 
-# 🚨 MUDANÇA: URL base do 1SecMail
+# 🚨 URL base do 1SecMail
 MAILTM    = "https://www.1secmail.com/api/v1/"
 FORM_URL  = "https://www.testersgc.fun/plan4z4k/afi9egnzv2"
 IBO_LOGIN = "https://iboplayer.com/dashboard"
@@ -101,11 +105,11 @@ def rand_name() -> tuple[str, str]:
     last  = ["Almeida", "Costa", "Ferreira", "Rocha", "Barbosa", "Mendes"]
     return secrets.choice(first), secrets.choice(last)
 
-# 🚨 NOVA FUNÇÃO: make_inbox para o 1SecMail
 async def make_inbox() -> tuple[str, str, str]:
     local = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
     
-    async with httpx.AsyncClient(timeout=20) as c:
+    # 🚨 ADICIONADO verify=False
+    async with httpx.AsyncClient(timeout=20, verify=False) as c:
         resp = await c.get(f"{MAILTM}?action=getDomainList")
         if resp.status_code != 200:
             raise Exception("Falha ao obter domínios do 1SecMail")
@@ -120,11 +124,11 @@ async def make_inbox() -> tuple[str, str, str]:
         log.info(f"✅ E-mail temporário criado (1SecMail): {addr}")
         return addr, local, domain
 
-# 🚨 NOVA FUNÇÃO: wait_for_email para o 1SecMail
 async def wait_for_email(inbox_addr: str, timeout_s: int = 600) -> dict:
     login, domain = inbox_addr.split("@")
     
-    async with httpx.AsyncClient(timeout=20) as c:
+    # 🚨 ADICIONADO verify=False
+    async with httpx.AsyncClient(timeout=20, verify=False) as c:
         for _ in range(timeout_s // 15): 
             await asyncio.sleep(15) 
             try:
@@ -354,11 +358,9 @@ async def iboplayer_update(m3u_url: str) -> bool:
             await browser.close()
 
 async def fetch_m3u() -> str | None:
-    # 🚨 MUDANÇA: Agora recebe (endereço, login, domínio)
     inbox_addr, _, domain = await make_inbox() 
     log.info(f"inbox: {inbox_addr}")
     
-    # Espera inicial para dar tempo do site enviar o e-mail
     log.info("⏳ Aguardando 30 segundos iniciais antes de checar a caixa de entrada...")
     await asyncio.sleep(30)
     
@@ -371,7 +373,6 @@ async def fetch_m3u() -> str | None:
         finally:
             await browser.close()
             
-    # 🚨 MUDANÇA: Passa o endereço completo para a função de espera
     msg = await wait_for_email(inbox_addr, timeout_s=600)
     
     body = msg.get("text") or " ".join(msg.get("html", []))
