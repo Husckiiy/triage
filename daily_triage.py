@@ -39,7 +39,7 @@ IBO_DEVKEY = os.getenv("IBO_DEVKEY")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 
 if not all([IBO_MAC, IBO_DEVKEY, IBO_EDIT]):
-    print("[!] .env incompleto")
+    print("[!] .env incompleto (Faltam IBO_MAC, IBO_DEVKEY ou IBO_EDIT)")
     sys.exit(3)
 
 BASE_DIR   = Path(os.getenv("DATA_DIR", str(Path(__file__).parent)))
@@ -101,13 +101,40 @@ def rand_name() -> tuple[str, str]:
 
 async def make_inbox() -> tuple[str, str, str]:
     async with httpx.AsyncClient(timeout=20) as c:
-        domains = (await c.get(f"{MAILTM}/domains")).json()
+        resp_domains = await c.get(f"{MAILTM}/domains")
+        domains = resp_domains.json()
+        
+        if not domains.get("hydra:member"):
+            log.error("❌ Nenhum domínio disponível no Mail.tm.")
+            raise Exception("Sem domínios no Mail.tm")
+
         domain = domains["hydra:member"][0]["domain"]
-        local = "t" + "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(11))
+        local = "t" + "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(15))
         addr = f"{local}@{domain}"
         pwd = secrets.token_urlsafe(12)
-        await c.post(f"{MAILTM}/accounts", json={"address": addr, "password": pwd})
-        tok = (await c.post(f"{MAILTM}/token", json={"address": addr, "password": pwd})).json()["token"]
+
+        resp_create = await c.post(f"{MAILTM}/accounts", json={"address": addr, "password": pwd})
+        
+        if resp_create.status_code != 201:
+            log.error(f"❌ Falha ao criar e-mail. Status: {resp_create.status_code}")
+            if len(domains["hydra:member"]) > 1:
+                log.info("Tentando o segundo domínio...")
+                domain = domains["hydra:member"][1]["domain"]
+                addr = f"{local}@{domain}"
+                resp_create = await c.post(f"{MAILTM}/accounts", json={"address": addr, "password": pwd})
+                if resp_create.status_code != 201:
+                    raise Exception("Falha ao criar conta no Mail.tm")
+            else:
+                raise Exception("Falha ao criar conta no Mail.tm")
+
+        resp_token = await c.post(f"{MAILTM}/token", json={"address": addr, "password": pwd})
+        
+        if resp_token.status_code != 200:
+            log.error(f"❌ Falha ao pegar token. Status: {resp_token.status_code}")
+            raise Exception("Falha ao obter token do Mail.tm")
+
+        tok = resp_token.json()["token"]
+        log.info(f"✅ E-mail temporário criado: {addr}")
         return addr, pwd, tok
 
 async def wait_for_email(token: str, timeout_s: int = 300) -> dict:
@@ -129,6 +156,7 @@ def extract_m3u(body: str) -> str | None:
 
 async def submit_form(page, inbox_addr: str):
     first, last = rand_name()
+    log.info("Acessando formulário testersgc...")
     await page.goto(FORM_URL, wait_until="networkidle")
     await page.wait_for_timeout(1500)
 
@@ -138,6 +166,14 @@ async def submit_form(page, inbox_addr: str):
             await page.wait_for_timeout(500)
         except PWTimeout:
             pass
+
+    # 🚨 CORREÇÃO: Espera o formulário carregar (até 60 segundos)
+    try:
+        await page.wait_for_selector('input[placeholder="Digite seu nome completo"]', timeout=60000)
+    except PWTimeout:
+        log.error("❌ O formulário não carregou a tempo.")
+        await page.screenshot(path="erro_form.png")
+        raise Exception("Formulário não encontrado")
 
     await page.get_by_placeholder("Digite seu nome completo").fill(f"{first} {last}")
     await page.get_by_placeholder("seu@email.com").fill(inbox_addr)
@@ -283,14 +319,21 @@ async def iboplayer_update(m3u_url: str) -> bool:
             await page.fill("#playlist-url", m3u_url)
             await page.wait_for_timeout(300)
             
-            log.info("Clicando no botao SAVE...")
-            try:
-                async with page.expect_navigation(timeout=10000, wait_until="networkidle"):
-                    await page.click('button:has-text("SAVE")', timeout=5000)
-                log.info("Navegacao apos o SAVE concluida.")
-            except Exception as e:
-                log.warning(f"AVISO: Nao houve navegacao apos o clique no SAVE. Erro: {e}")
-                
+            # 🚨 CORREÇÃO: Remove pop-ups e clica em SAVE via JS
+            log.info("Removendo pop-ups que possam bloquear o botão...")
+            await page.evaluate("""() => { 
+                const elements = document.querySelectorAll('div.fixed, div[class*="overlay"], div[class*="z-"]');
+                for (let i = 0; i < elements.length; i++) { elements[i].remove(); }
+            }""")
+            await page.wait_for_timeout(1000)
+            
+            log.info("Clicando no botao SAVE via JS...")
+            await page.evaluate("""() => { 
+                const btn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.trim().toUpperCase() === 'SAVE'); 
+                if (btn) btn.click(); 
+            }""")
+            
+            await page.wait_for_timeout(5000)
             await _accept_modals(page)
             
             if "/edit/" not in page.url:
