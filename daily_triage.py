@@ -137,15 +137,28 @@ async def make_inbox() -> tuple[str, str, str]:
         log.info(f"✅ E-mail temporário criado: {addr}")
         return addr, pwd, tok
 
-async def wait_for_email(token: str, timeout_s: int = 300) -> dict:
+# 🚨 FUNÇÃO CORRIGIDA AQUI (Evita erro 429)
+async def wait_for_email(token: str, timeout_s: int = 600) -> dict:
     headers = {"Authorization": f"Bearer {token}"}
     async with httpx.AsyncClient(timeout=20, headers=headers) as c:
-        for _ in range(timeout_s // 5):
-            await asyncio.sleep(5)
-            msgs = (await c.get(f"{MAILTM}/messages")).json()
-            if msgs.get("hydra:member"):
-                mid = msgs["hydra:member"][0]["id"]
-                return (await c.get(f"{MAILTM}/messages/{mid}")).json()
+        for _ in range(timeout_s // 15): 
+            await asyncio.sleep(15) 
+            try:
+                resp = await c.get(f"{MAILTM}/messages")
+                
+                if resp.status_code == 429:
+                    log.warning("⚠️ Mail.tm bloqueou (429 Too Many Requests). Esperando 60 segundos...")
+                    await asyncio.sleep(60)
+                    continue
+                
+                msgs = resp.json()
+                if msgs.get("hydra:member"):
+                    mid = msgs["hydra:member"][0]["id"]
+                    return (await c.get(f"{MAILTM}/messages/{mid}")).json()
+            except Exception as e:
+                log.error(f"Erro ao checar e-mail: {e}")
+                await asyncio.sleep(15)
+                
     raise TimeoutError("sem email na janela")
 
 def extract_m3u(body: str) -> str | None:
@@ -167,7 +180,6 @@ async def submit_form(page, inbox_addr: str):
         except PWTimeout:
             pass
 
-    # 🚨 CORREÇÃO: Espera o formulário carregar (até 60 segundos)
     try:
         await page.wait_for_selector('input[placeholder="Digite seu nome completo"]', timeout=60000)
     except PWTimeout:
@@ -319,7 +331,6 @@ async def iboplayer_update(m3u_url: str) -> bool:
             await page.fill("#playlist-url", m3u_url)
             await page.wait_for_timeout(300)
             
-            # 🚨 CORREÇÃO: Remove pop-ups e clica em SAVE via JS
             log.info("Removendo pop-ups que possam bloquear o botão...")
             await page.evaluate("""() => { 
                 const elements = document.querySelectorAll('div.fixed, div[class*="overlay"], div[class*="z-"]');
@@ -363,7 +374,9 @@ async def fetch_m3u() -> str | None:
             await submit_form(page, inbox_addr)
         finally:
             await browser.close()
-    msg = await wait_for_email(token)
+            
+    # 🚨 FUNÇÃO CORRIGIDA AQUI (timeout_s=600)
+    msg = await wait_for_email(token, timeout_s=600)
     body = msg.get("text") or " ".join(msg.get("html", []))
     return extract_m3u(body)
 
